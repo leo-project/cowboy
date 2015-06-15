@@ -866,7 +866,7 @@ reply(Status, Headers, Body, Req=#http_req{
 			%% We stream the response body for ContentLength bytes.
 			RespConn = response_connection(Headers, Connection),
 			{RespType, Req2} = response(Status, Headers, RespHeaders, [
-					{<<"content-length">>, integer_to_list(ContentLength)},
+					{<<"Content-Length">>, integer_to_list(ContentLength)},
 					{<<"date">>, cowboy_clock:rfc1123()},
 					{<<"server">>, <<"Cowboy">>}
 				|HTTP11Headers], stream, Req),
