@@ -55,7 +55,10 @@ http_date(<<"Wed ", R/bits >>) -> asctime_date(R);
 http_date(<<"Thu ", R/bits >>) -> asctime_date(R);
 http_date(<<"Fri ", R/bits >>) -> asctime_date(R);
 http_date(<<"Sat ", R/bits >>) -> asctime_date(R);
-http_date(<<"Sun ", R/bits >>) -> asctime_date(R).
+http_date(<<"Sun ", R/bits >>) -> asctime_date(R);
+%% For ISO8601 YYYYMMDDTHHMISSZ
+http_date(<<Y1, Y2, Y3, Y4, M1, M2, D1, D2, "T", H1, H2, MI1, MI2, S1, S2, "Z">>) ->
+    {{?DIGITS(Y1, Y2, Y3, Y4), ?DIGITS(M1, M2), ?DIGITS(D1, D2)}, {?DIGITS(H1, H2), ?DIGITS(MI1, MI2), ?DIGITS(S1, S2)}}.
 
 fixdate(<<"Jan ", Y1, Y2, Y3, Y4, " ", H1, H2, ":", M1, M2, ":", S1, S2, _Rest/binary>>, Day) ->
     {{?DIGITS(Y1, Y2, Y3, Y4), 1, Day}, {?DIGITS(H1, H2), ?DIGITS(M1, M2), ?DIGITS(S1, S2)}};
@@ -179,7 +182,8 @@ http_date_test_() ->
     Tests = [
         {<<"Sun, 06 Nov 1994 08:49:37 GMT">>, {{1994, 11, 6}, {8, 49, 37}}},
         {<<"Sunday, 06-Nov-94 08:49:37 GMT">>, {{1994, 11, 6}, {8, 49, 37}}},
-        {<<"Sun Nov  6 08:49:37 1994">>, {{1994, 11, 6}, {8, 49, 37}}}
+        {<<"Sun Nov  6 08:49:37 1994">>, {{1994, 11, 6}, {8, 49, 37}}},
+        {<<"19941106T084937Z">>, {{1994, 11, 6}, {8, 49, 37}}}
     ],
     [{V, fun() -> R = http_date(V) end} || {V, R} <- Tests].
 
@@ -196,6 +200,11 @@ horse_http_date_rfc850() ->
 horse_http_date_asctime() ->
     horse:repeat(200000,
         http_date(<<"Sun Nov  6 08:49:37 1994">>)
+    ).
+
+horse_http_date_iso8601() ->
+    horse:repeat(200000,
+        http_date(<<"19941106T084937Z">>)
     ).
 -endif.
 
