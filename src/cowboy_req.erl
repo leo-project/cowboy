@@ -1225,6 +1225,13 @@ response_merge_headers(Headers, RespHeaders, DefaultHeaders) ->
 -spec merge_headers(cowboy:http_headers(), cowboy:http_headers())
 	-> cowboy:http_headers().
 
+merge_headers(Headers_1, Headers_2) ->
+    CHeaders_1 = [{cowboy_bstr:capitalize_token(N), V}
+                  || {N, V} <- Headers_1],
+    CHeaders_2 = [{cowboy_bstr:capitalize_token(N), V}
+                  || {N, V} <- Headers_2],
+    merge_headers_1(CHeaders_1, CHeaders_2).
+
 %% Merge headers by prepending the tuples in the second list to the
 %% first list. It also handles Set-Cookie properly, which supports
 %% duplicated entries. Notice that, while the RFC2109 does allow more
@@ -1232,16 +1239,16 @@ response_merge_headers(Headers, RespHeaders, DefaultHeaders) ->
 %% the implementation of common web servers and applications which
 %% return many distinct headers per each Set-Cookie entry to avoid
 %% issues with clients/browser which may not support it.
-merge_headers(Headers, []) ->
+merge_headers_1(Headers, []) ->
 	Headers;
-merge_headers(Headers, [{<<"set-cookie">>, Value}|Tail]) ->
-	merge_headers([{<<"set-cookie">>, Value}|Headers], Tail);
-merge_headers(Headers, [{Name, Value}|Tail]) ->
+merge_headers_1(Headers, [{<<"Set-Cookie">>, Value}|Tail]) ->
+	merge_headers_1([{<<"Set-Cookie">>, Value}|Headers], Tail);
+merge_headers_1(Headers, [{Name, Value}|Tail]) ->
 	Headers2 = case lists:keymember(Name, 1, Headers) of
 		true -> Headers;
 		false -> [{Name, Value}|Headers]
 	end,
-	merge_headers(Headers2, Tail).
+	merge_headers_1(Headers2, Tail).
 
 -spec atom_to_connection(keepalive) -> <<_:80>>;
 						(close) -> <<_:40>>.
