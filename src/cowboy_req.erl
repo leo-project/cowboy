@@ -1222,14 +1222,26 @@ response_merge_headers(Headers, RespHeaders, DefaultHeaders) ->
 		merge_headers(Headers2, RespHeaders),
 		DefaultHeaders).
 
+camelize_header({<<"ETag">>, _} = Header) ->
+    Header;
+camelize_header({<<"x-amz-meta-", _/binary>>, _} = Header) ->
+    Header;
+camelize_header({N, V}) when is_binary(N) ->
+    {cowboy_bstr:capitalize_token(N), V};
+camelize_header(Header) ->
+    Header.
+
 -spec merge_headers(cowboy:http_headers(), cowboy:http_headers())
 	-> cowboy:http_headers().
 
+%% Headers are first converted to Camel Case before merge, otherwise 
+%% headers with different case would not be merged
+%% Camel Case is chosen as the target as it provides the most 
+%% compatibility with http clients
+%% https://github.com/leo-project/leofs/issues/489#issuecomment-265943379
 merge_headers(Headers_1, Headers_2) ->
-    CHeaders_1 = [{cowboy_bstr:capitalize_token(N), V}
-                  || {N, V} <- Headers_1],
-    CHeaders_2 = [{cowboy_bstr:capitalize_token(N), V}
-                  || {N, V} <- Headers_2],
+    CHeaders_1 = [camelize_header(E) || E <- Headers_1],
+    CHeaders_2 = [camelize_header(E) || E <- Headers_2],
     merge_headers_1(CHeaders_1, CHeaders_2).
 
 %% Merge headers by prepending the tuples in the second list to the
