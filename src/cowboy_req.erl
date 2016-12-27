@@ -1222,8 +1222,27 @@ response_merge_headers(Headers, RespHeaders, DefaultHeaders) ->
 		merge_headers(Headers2, RespHeaders),
 		DefaultHeaders).
 
+camelize_header({<<"ETag">>, _} = Header) ->
+    Header;
+camelize_header({<<"x-amz-meta-", _/binary>>, _} = Header) ->
+    Header;
+camelize_header({N, V}) when is_binary(N) ->
+    {cowboy_bstr:capitalize_token(N), V};
+camelize_header(Header) ->
+    Header.
+
 -spec merge_headers(cowboy:http_headers(), cowboy:http_headers())
 	-> cowboy:http_headers().
+
+%% Headers are first converted to Camel Case before merge, otherwise 
+%% headers with different case would not be merged
+%% Camel Case is chosen as the target as it provides the most 
+%% compatibility with http clients
+%% https://github.com/leo-project/leofs/issues/489#issuecomment-265943379
+merge_headers(Headers_1, Headers_2) ->
+    CHeaders_1 = [camelize_header(E) || E <- Headers_1],
+    CHeaders_2 = [camelize_header(E) || E <- Headers_2],
+    merge_headers_1(CHeaders_1, CHeaders_2).
 
 %% Merge headers by prepending the tuples in the second list to the
 %% first list. It also handles Set-Cookie properly, which supports
@@ -1232,16 +1251,16 @@ response_merge_headers(Headers, RespHeaders, DefaultHeaders) ->
 %% the implementation of common web servers and applications which
 %% return many distinct headers per each Set-Cookie entry to avoid
 %% issues with clients/browser which may not support it.
-merge_headers(Headers, []) ->
+merge_headers_1(Headers, []) ->
 	Headers;
-merge_headers(Headers, [{<<"set-cookie">>, Value}|Tail]) ->
-	merge_headers([{<<"set-cookie">>, Value}|Headers], Tail);
-merge_headers(Headers, [{Name, Value}|Tail]) ->
+merge_headers_1(Headers, [{<<"Set-Cookie">>, Value}|Tail]) ->
+	merge_headers_1([{<<"Set-Cookie">>, Value}|Headers], Tail);
+merge_headers_1(Headers, [{Name, Value}|Tail]) ->
 	Headers2 = case lists:keymember(Name, 1, Headers) of
 		true -> Headers;
 		false -> [{Name, Value}|Headers]
 	end,
-	merge_headers(Headers2, Tail).
+	merge_headers_1(Headers2, Tail).
 
 -spec atom_to_connection(keepalive) -> <<_:80>>;
 						(close) -> <<_:40>>.
