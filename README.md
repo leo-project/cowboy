@@ -22,7 +22,7 @@ Sponsors
 --------
 
 The SPDY implementation was sponsored by
-[LeoFS Cloud Storage](http://www.leofs.org).
+[LeoFS Cloud Storage](https://leo-project.net/leofs/).
 
 The project is currently sponsored by
 [Kato.im](https://kato.im).
