@@ -928,11 +928,20 @@ reply_may_compress(Status, Headers, Body, Req,
 
 reply_no_compress(Status, Headers, Body, Req,
 		RespHeaders, HTTP11Headers, Method, BodySize) ->
-	{_, Req2} = response(Status, Headers, RespHeaders, [
-			{<<"content-length">>, integer_to_list(BodySize)},
-			{<<"date">>, cowboy_clock:rfc1123()},
-			{<<"server">>, <<"Cowboy">>}
-		|HTTP11Headers],
+    DefaultHeaders = case Status of
+                         304 ->
+                             [
+                                 {<<"date">>, cowboy_clock:rfc1123()},
+                                 {<<"server">>, <<"Cowboy">>}
+                             |HTTP11Headers];
+                         _ ->
+                             [
+                                 {<<"content-length">>, integer_to_list(BodySize)},
+                                 {<<"date">>, cowboy_clock:rfc1123()},
+                                 {<<"server">>, <<"Cowboy">>}
+                             |HTTP11Headers]
+                     end,
+	{_, Req2} = response(Status, Headers, RespHeaders, DefaultHeaders,
 		case Method of <<"HEAD">> -> <<>>; _ -> Body end,
 		Req),
 	Req2.
