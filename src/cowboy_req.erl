@@ -929,7 +929,7 @@ reply_may_compress(Status, Headers, Body, Req,
 reply_no_compress(Status, Headers, Body, Req,
 		RespHeaders, HTTP11Headers, Method, BodySize) ->
     DefaultHeaders = case Status of
-                         304 ->
+                         Code when Code =:= 204; Code =:= 304 ->
                              [
                                  {<<"date">>, cowboy_clock:rfc1123()},
                                  {<<"server">>, <<"Cowboy">>}
