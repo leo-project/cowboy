@@ -243,19 +243,24 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport, opts=Opts,
 		%% Discard data coming in after the last request
 		%% we want to process was received fully.
 		{OK, Socket, Data} when OK =:= element(1, Messages), InStreamID > LastStreamID ->
+			error_logger:info_msg("[cowboy_http] loop: received data after last stream, discarding DataSize=~p~n", [byte_size(Data)]),
 			State1 = maybe_resize_buffer(State, Data),
 			before_loop(State1);
 		%% Socket messages.
 		{OK, Socket, Data} when OK =:= element(1, Messages) ->
+			error_logger:info_msg("[cowboy_http] loop: received socket data, DataSize=~p, InStreamID=~p~n", [byte_size(Data), InStreamID]),
 			State1 = maybe_resize_buffer(State, Data),
 			parse(<< Buffer/binary, Data/binary >>, State1);
 		{Closed, Socket} when Closed =:= element(2, Messages) ->
+			error_logger:info_msg("[cowboy_http] loop: socket closed~n", []),
 			terminate(State, {socket_error, closed, 'The socket has been closed.'});
 		{Error, Socket, Reason} when Error =:= element(3, Messages) ->
+			error_logger:info_msg("[cowboy_http] loop: socket error, Reason=~p~n", [Reason]),
 			terminate(State, {socket_error, Reason, 'An error has occurred on the socket.'});
 		{Passive, Socket} when Passive =:= element(4, Messages);
 				%% Hardcoded for compatibility with Ranch 1.x.
 				Passive =:= tcp_passive; Passive =:= ssl_passive ->
+			error_logger:info_msg("[cowboy_http] loop: socket passive, reactivating~n", []),
 			safe_setopts_active(State),
 			before_loop(State);
 		%% Timeouts.
@@ -973,26 +978,34 @@ opts_for_upgrade(#state{opts=Opts, dynamic_buffer_size=Size,
 parse_body(Buffer, State=#state{in_streamid=StreamID, in_state=
 		PS=#ps_body{received=Received, transfer_decode_fun=TDecode,
 			transfer_decode_state=TState0}}) ->
+	error_logger:info_msg("[cowboy_http] parse_body: StreamID=~p, BufferSize=~p, Received=~p~n",
+		[StreamID, byte_size(Buffer), Received]),
 	%% @todo Proper trailers.
 	try TDecode(Buffer, TState0) of
 		more ->
+			error_logger:info_msg("[cowboy_http] parse_body result: more (waiting for data)~n", []),
 			{more, State#state{buffer=Buffer}};
 		{more, Data, TState} ->
+			error_logger:info_msg("[cowboy_http] parse_body result: more with data, DataSize=~p~n", [byte_size(Data)]),
 			{data, StreamID, nofin, Data, State#state{buffer= <<>>,
 				in_state=PS#ps_body{received=Received + byte_size(Data),
 					transfer_decode_state=TState}}};
 		{more, Data, _Length, TState} when is_integer(_Length) ->
+			error_logger:info_msg("[cowboy_http] parse_body result: more with data and length, DataSize=~p~n", [byte_size(Data)]),
 			{data, StreamID, nofin, Data, State#state{buffer= <<>>,
 				in_state=PS#ps_body{received=Received + byte_size(Data),
 					transfer_decode_state=TState}}};
 		{more, Data, Rest, TState} ->
+			error_logger:info_msg("[cowboy_http] parse_body result: more with data and rest, DataSize=~p~n", [byte_size(Data)]),
 			{data, StreamID, nofin, Data, State#state{buffer=Rest,
 				in_state=PS#ps_body{received=Received + byte_size(Data),
 					transfer_decode_state=TState}}};
 		{done, _HasTrailers, Rest} ->
+			error_logger:info_msg("[cowboy_http] parse_body result: done (no data)~n", []),
 			{data, StreamID, fin, <<>>,
 				State#state{buffer=Rest, in_streamid=StreamID + 1, in_state=#ps_request_line{}}};
 		{done, Data, _HasTrailers, Rest} ->
+			error_logger:info_msg("[cowboy_http] parse_body result: done with data, DataSize=~p~n", [byte_size(Data)]),
 			{data, StreamID, fin, Data,
 				State#state{buffer=Rest, in_streamid=StreamID + 1, in_state=#ps_request_line{}}}
 	catch _:_ ->
@@ -1067,9 +1080,10 @@ commands(State=#state{out_streamid=Current, streams=Streams0}, StreamID, Command
 	State#state{streams=Streams};
 %% When we have finished reading the request body, do nothing.
 commands(State=#state{flow=infinity}, StreamID, [{flow, _}|Tail]) ->
+	error_logger:info_msg("[cowboy_http] commands(flow, infinity): StreamID=~p, skipping~n", [StreamID]),
 	commands(State, StreamID, Tail);
 %% Read the request body.
-commands(State0=#state{flow=Flow0}, StreamID, [{flow, Size}|Tail]) ->
+commands(State0=#state{flow=Flow0, active=Active}, StreamID, [{flow, Size}|Tail]) ->
 	%% We must read *at least* Size of data otherwise functions
 	%% like cowboy_req:read_body/1,2 will wait indefinitely.
 	Flow = if
@@ -1079,8 +1093,12 @@ commands(State0=#state{flow=Flow0}, StreamID, [{flow, Size}|Tail]) ->
 	%% Reenable active mode if necessary.
 	State = if
 		Flow0 =< 0, Flow > 0 ->
+			error_logger:info_msg("[cowboy_http] commands(flow): StreamID=~p, Flow0=~p -> Flow=~p, Active=~p, reactivating socket~n",
+				[StreamID, Flow0, Flow, Active]),
 			active(State0);
 		true ->
+			error_logger:info_msg("[cowboy_http] commands(flow): StreamID=~p, Flow0=~p -> Flow=~p, Active=~p, no change~n",
+				[StreamID, Flow0, Flow, Active]),
 			State0
 	end,
 	commands(State#state{flow=Flow}, StreamID, Tail);
@@ -1103,12 +1121,16 @@ commands(State0=#state{socket=Socket, transport=Transport, out_state=wait, strea
 	%% @todo I'm pretty sure the last stream in the list is the one we want
 	%% considering all others are queued.
 	#stream{version=Version} = lists:keyfind(StreamID, #stream.id, Streams),
+	error_logger:info_msg("[cowboy_http] commands(inform): StreamID=~p, StatusCode=~p, Version=~p~n",
+		[StreamID, StatusCode, Version]),
 	_ = case Version of
 		'HTTP/1.1' ->
+			error_logger:info_msg("[cowboy_http] Sending 100 Continue response to client~n", []),
 			ok = maybe_socket_error(State0, Transport:send(Socket,
 				cow_http:response(StatusCode, 'HTTP/1.1', headers_to_list(Headers))));
 		%% Do not send informational responses to HTTP/1.0 clients. (RFC7231 6.2)
 		'HTTP/1.0' ->
+			error_logger:info_msg("[cowboy_http] Skipping informational response for HTTP/1.0~n", []),
 			ok
 	end,
 	State = maybe_reset_idle_timeout(State0),
