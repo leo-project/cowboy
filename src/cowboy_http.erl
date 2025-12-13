@@ -248,7 +248,11 @@ loop(State=#state{parent=Parent, socket=Socket, transport=Transport, opts=Opts,
 			before_loop(State1);
 		%% Socket messages.
 		{OK, Socket, Data} when OK =:= element(1, Messages) ->
-			error_logger:info_msg("[cowboy_http] loop: received socket data, DataSize=~p, InStreamID=~p~n", [byte_size(Data), InStreamID]),
+			DataFirst50_loop = case byte_size(Data) > 50 of
+				true -> binary:part(Data, 0, 50);
+				false -> Data
+			end,
+			error_logger:info_msg("[cowboy_http] loop: received socket data, DataSize=~p, InStreamID=~p, DataFirst50=~p~n", [byte_size(Data), InStreamID, DataFirst50_loop]),
 			State1 = maybe_resize_buffer(State, Data),
 			parse(<< Buffer/binary, Data/binary >>, State1);
 		{Closed, Socket} when Closed =:= element(2, Messages) ->
@@ -400,6 +404,20 @@ parse(Buffer, State=#state{in_state=#ps_body{}}) ->
 after_parse({request, Req=#{streamid := StreamID, method := Method,
 		headers := Headers, version := Version},
 		State0=#state{opts=Opts, buffer=Buffer, streams=Streams0}}) ->
+	BufferFirst50_ap = case byte_size(Buffer) > 50 of
+		true -> binary:part(Buffer, 0, 50);
+		false -> Buffer
+	end,
+	error_logger:info_msg("[cowboy_http] after_parse(request): StreamID=~p, BufferSize=~p, BufferFirst50=~p~n",
+		[StreamID, byte_size(Buffer), BufferFirst50_ap]),
+	%% Send 100-continue immediately to satisfy boto3's short timeout.
+	%% Note: This may cause duplicate data to be received from the socket, but
+	%% we work around that by checking the data in parse_body.
+	ExpectHdr = maps:get(<<"expect">>, Headers, undefined),
+	HasBody = maps:get(has_body, Req, false),
+	error_logger:info_msg("[cowboy_http] after_parse: ExpectHdr=~p, Version=~p, HasBody=~p~n",
+		[ExpectHdr, Version, HasBody]),
+	%% Let cowboy_stream_h handle 100-continue (it will send it immediately in init)
 	try cowboy_stream:init(StreamID, Req, Opts) of
 		{Commands, StreamState} ->
 			Flow = maps:get(initial_stream_flow_size, Opts, 65535),
@@ -897,6 +915,15 @@ request(Buffer, State0=#state{ref=Ref, transport=Transport, peer=Peer, sock=Sock
 				false ->
 					State0#state{in_streamid=StreamID + 1, in_state=#ps_request_line{}}
 			end,
+			BufferFirst50_req = case byte_size(Buffer) > 50 of
+				true -> binary:part(Buffer, 0, 50);
+				false -> Buffer
+			end,
+			ExpectHdr = maps:get(<<"expect">>, Headers, undefined),
+			error_logger:info_msg("[cowboy_http] request complete: StreamID=~p, HasBody=~p, BodyLength=~p, BufferSize=~p, BufferFirst50=~p, Expect=~p~n",
+				[StreamID, HasBody, BodyLength, byte_size(Buffer), BufferFirst50_req, ExpectHdr]),
+			%% NOTE: 100-continue is sent in after_parse() after stream init, not here
+			%% because sending here causes duplicate data issues with {active, N} mode.
 			{request, Req, State#state{buffer=Buffer}};
 		{true, HTTP2Settings} ->
 			%% We save the headers in case the upgrade will fail
@@ -978,20 +1005,32 @@ opts_for_upgrade(#state{opts=Opts, dynamic_buffer_size=Size,
 parse_body(Buffer, State=#state{in_streamid=StreamID, in_state=
 		PS=#ps_body{received=Received, transfer_decode_fun=TDecode,
 			transfer_decode_state=TState0}}) ->
-	error_logger:info_msg("[cowboy_http] parse_body: StreamID=~p, BufferSize=~p, Received=~p~n",
-		[StreamID, byte_size(Buffer), Received]),
+	BufferFirst50 = case byte_size(Buffer) > 50 of
+		true -> binary:part(Buffer, 0, 50);
+		false -> Buffer
+	end,
+	error_logger:info_msg("[cowboy_http] parse_body: StreamID=~p, BufferSize=~p, Received=~p, BufferFirst50=~p~n",
+		[StreamID, byte_size(Buffer), Received, BufferFirst50]),
 	%% @todo Proper trailers.
 	try TDecode(Buffer, TState0) of
 		more ->
 			error_logger:info_msg("[cowboy_http] parse_body result: more (waiting for data)~n", []),
 			{more, State#state{buffer=Buffer}};
 		{more, Data, TState} ->
-			error_logger:info_msg("[cowboy_http] parse_body result: more with data, DataSize=~p~n", [byte_size(Data)]),
+			DataFirst50 = case byte_size(Data) > 50 of
+				true -> binary:part(Data, 0, 50);
+				false -> Data
+			end,
+			error_logger:info_msg("[cowboy_http] parse_body result: more with data, DataSize=~p, DataFirst50=~p~n", [byte_size(Data), DataFirst50]),
 			{data, StreamID, nofin, Data, State#state{buffer= <<>>,
 				in_state=PS#ps_body{received=Received + byte_size(Data),
 					transfer_decode_state=TState}}};
 		{more, Data, _Length, TState} when is_integer(_Length) ->
-			error_logger:info_msg("[cowboy_http] parse_body result: more with data and length, DataSize=~p~n", [byte_size(Data)]),
+			DataFirst50_2 = case byte_size(Data) > 50 of
+				true -> binary:part(Data, 0, 50);
+				false -> Data
+			end,
+			error_logger:info_msg("[cowboy_http] parse_body result: more with data and length, DataSize=~p, DataFirst50=~p~n", [byte_size(Data), DataFirst50_2]),
 			{data, StreamID, nofin, Data, State#state{buffer= <<>>,
 				in_state=PS#ps_body{received=Received + byte_size(Data),
 					transfer_decode_state=TState}}};
@@ -1005,7 +1044,11 @@ parse_body(Buffer, State=#state{in_streamid=StreamID, in_state=
 			{data, StreamID, fin, <<>>,
 				State#state{buffer=Rest, in_streamid=StreamID + 1, in_state=#ps_request_line{}}};
 		{done, Data, _HasTrailers, Rest} ->
-			error_logger:info_msg("[cowboy_http] parse_body result: done with data, DataSize=~p~n", [byte_size(Data)]),
+			DataFirst50_3 = case byte_size(Data) > 50 of
+				true -> binary:part(Data, 0, 50);
+				false -> Data
+			end,
+			error_logger:info_msg("[cowboy_http] parse_body result: done with data, DataSize=~p, DataFirst50=~p~n", [byte_size(Data), DataFirst50_3]),
 			{data, StreamID, fin, Data,
 				State#state{buffer=Rest, in_streamid=StreamID + 1, in_state=#ps_request_line{}}}
 	catch _:_ ->

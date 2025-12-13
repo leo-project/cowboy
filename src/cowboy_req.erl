@@ -528,13 +528,40 @@ read_body(Req, Opts) ->
 	end,
 	Timeout = maps:get(timeout, Opts, DefaultTimeout),
 	Ref = make_ref(),
+	error_logger:info_msg("[cowboy_req] read_body: Self=~p, Ref=~p, Length=~p, Period=~p, Timeout=~p~n",
+		[self(), Ref, Length, Period, Timeout]),
 	cast({read_body, self(), Ref, Length, Period}, Req),
+	error_logger:info_msg("[cowboy_req] read_body: waiting for response, Ref=~p~n", [Ref]),
 	receive
 		{request_body, Ref, nofin, Body} ->
+			error_logger:info_msg("[cowboy_req] read_body: received nofin, BodySize=~p~n", [byte_size(Body)]),
 			{more, Body, Req};
 		{request_body, Ref, fin, BodyLength, Body} ->
+			error_logger:info_msg("[cowboy_req] read_body: received fin, BodyLength=~p, BodySize=~p~n",
+				[BodyLength, byte_size(Body)]),
+			{ok, Body, set_body_length(Req, BodyLength)};
+		Other ->
+			error_logger:info_msg("[cowboy_req] read_body: received UNEXPECTED message: ~p, expected Ref=~p~n",
+				[Other, Ref]),
+			self() ! Other, %% Put it back
+			read_body_wait(Ref, Timeout, Req)
+	after Timeout ->
+		error_logger:info_msg("[cowboy_req] read_body: TIMEOUT after ~p ms, Ref=~p, mailbox=~p~n",
+			[Timeout, Ref, process_info(self(), messages)]),
+		exit(timeout)
+	end.
+
+read_body_wait(Ref, Timeout, Req) ->
+	receive
+		{request_body, Ref, nofin, Body} ->
+			error_logger:info_msg("[cowboy_req] read_body_wait: received nofin, BodySize=~p~n", [byte_size(Body)]),
+			{more, Body, Req};
+		{request_body, Ref, fin, BodyLength, Body} ->
+			error_logger:info_msg("[cowboy_req] read_body_wait: received fin, BodyLength=~p, BodySize=~p~n",
+				[BodyLength, byte_size(Body)]),
 			{ok, Body, set_body_length(Req, BodyLength)}
 	after Timeout ->
+		error_logger:info_msg("[cowboy_req] read_body_wait: TIMEOUT, Ref=~p~n", [Ref]),
 		exit(timeout)
 	end.
 
@@ -848,6 +875,16 @@ reply(Status = <<"204",_/bits>>, Headers, Body, Req) ->
 	do_reply_ensure_no_body(Status, Headers, Body, Req);
 reply(Status = <<"304",_/bits>>, Headers, Body, Req) ->
 	do_reply_ensure_no_body(Status, Headers, Body, Req);
+%% For HEAD requests, preserve existing Content-Length if set (case-insensitive check)
+%% This is needed because HEAD responses should report the content-length of the body
+%% that WOULD be sent if this were a GET request.
+reply(Status, Headers, Body, Req=#{method := <<"HEAD">>})
+		when is_integer(Status); is_binary(Status) ->
+	Headers2 = case has_content_length(Headers) of
+		true -> Headers;
+		false -> Headers#{<<"content-length">> => integer_to_binary(iolist_size(Body))}
+	end,
+	do_reply(Status, Headers2, Body, Req);
 reply(Status, Headers, Body, Req)
 		when is_integer(Status); is_binary(Status) ->
 	do_reply(Status, Headers#{
@@ -862,6 +899,13 @@ do_reply_ensure_no_body(Status, Headers, Body, Req) ->
 			exit({response_error, payload_too_large,
 				'204 and 304 responses must not include a body. (RFC7230 3.3)'})
 	end.
+
+%% Check if content-length header is already set (case-insensitive)
+%% This is used for HEAD responses where we want to preserve the
+%% application-provided Content-Length.
+has_content_length(Headers) ->
+	maps:is_key(<<"content-length">>, Headers) orelse
+	maps:is_key(<<"Content-Length">>, Headers).
 
 %% Don't send any body for HEAD responses. While the protocol code is
 %% supposed to enforce this rule, we prefer to avoid copying too much

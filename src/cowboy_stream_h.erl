@@ -46,12 +46,23 @@ init(StreamID, Req=#{ref := Ref}, Opts) ->
 	Env = maps:get(env, Opts, #{}),
 	Middlewares = maps:get(middlewares, Opts, [cowboy_router, cowboy_handler]),
 	Shutdown = maps:get(shutdown_timeout, Opts, 5000),
-	Pid = proc_lib:spawn_link(?MODULE, request_process, [Req, Env, Middlewares]),
 	Expect = expect(Req),
 	error_logger:info_msg("[cowboy_stream_h] init: StreamID=~p, Expect=~p~n", [StreamID, Expect]),
-	{Commands, Next} = cowboy_stream:init(StreamID, Req, Opts),
-	{[{spawn, Pid, Shutdown}|Commands],
-		#state{next=Next, ref=Ref, pid=Pid, expect=Expect}}.
+	%% Send 100-continue immediately BEFORE spawning handler to minimize delay.
+	%% This is critical for boto3 which has a very short timeout (~1 second).
+	{Commands100} = case Expect of
+		continue ->
+			error_logger:info_msg("[cowboy_stream_h] init: Sending immediate 100-continue for boto3~n"),
+			{[{inform, 100, #{}}]};
+		_ ->
+			{[]}
+	end,
+	%% Now spawn the handler
+	Pid = proc_lib:spawn_link(?MODULE, request_process, [Req, Env, Middlewares]),
+	{Commands0, Next} = cowboy_stream:init(StreamID, Req, Opts),
+	%% Combine: 100-continue first, then spawn, then other commands
+	{Commands100 ++ [{spawn, Pid, Shutdown}|Commands0],
+		#state{next=Next, ref=Ref, pid=Pid, expect=undefined}}.
 
 %% Ignore the expect header in HTTP/1.0.
 expect(#{version := 'HTTP/1.0'}) ->
@@ -79,8 +90,12 @@ expect(Req) ->
 %% Stream isn't waiting for data.
 data(StreamID, IsFin, Data, State=#state{
 		read_body_ref=undefined, read_body_buffer=Buffer, body_length=BodyLen}) ->
-	error_logger:info_msg("[cowboy_stream_h] data(not_waiting): StreamID=~p, IsFin=~p, DataSize=~p, BufferSize=~p~n",
-		[StreamID, IsFin, byte_size(Data), byte_size(Buffer)]),
+	DataFirst50 = case byte_size(Data) > 50 of
+		true -> binary:part(Data, 0, 50);
+		false -> Data
+	end,
+	error_logger:info_msg("[cowboy_stream_h] data(not_waiting): StreamID=~p, IsFin=~p, DataSize=~p, BufferSize=~p, DataFirst50=~p~n",
+		[StreamID, IsFin, byte_size(Data), byte_size(Buffer), DataFirst50]),
 	do_data(StreamID, IsFin, Data, [], State#state{
 		expect=undefined,
 		read_body_is_fin=IsFin,
@@ -103,8 +118,16 @@ data(StreamID, IsFin, Data, State=#state{read_body_pid=Pid, read_body_ref=Ref,
 data(StreamID, IsFin=nofin, Data, State=#state{
 		read_body_length=ReadLen, read_body_buffer=Buffer, body_length=BodyLen})
 		when byte_size(Data) + byte_size(Buffer) < ReadLen ->
-	error_logger:info_msg("[cowboy_stream_h] data(not_enough): StreamID=~p, DataSize=~p, BufferSize=~p, ReadLen=~p~n",
-		[StreamID, byte_size(Data), byte_size(Buffer), ReadLen]),
+	DataFirst50_ne = case byte_size(Data) > 50 of
+		true -> binary:part(Data, 0, 50);
+		false -> Data
+	end,
+	BufferFirst50_ne = case byte_size(Buffer) > 50 of
+		true -> binary:part(Buffer, 0, 50);
+		false -> Buffer
+	end,
+	error_logger:info_msg("[cowboy_stream_h] data(not_enough): StreamID=~p, DataSize=~p, BufferSize=~p, ReadLen=~p, DataFirst50=~p, BufferFirst50=~p~n",
+		[StreamID, byte_size(Data), byte_size(Buffer), ReadLen, DataFirst50_ne, BufferFirst50_ne]),
 	do_data(StreamID, IsFin, Data, [], State#state{
 		expect=undefined,
 		read_body_buffer= << Buffer/binary, Data/binary >>,
@@ -114,10 +137,19 @@ data(StreamID, IsFin=nofin, Data, State=#state{
 data(StreamID, IsFin, Data, State=#state{read_body_pid=Pid, read_body_ref=Ref,
 		read_body_timer_ref=TRef, read_body_buffer=Buffer, body_length=BodyLen0}) ->
 	BodyLen = BodyLen0 + byte_size(Data),
-	error_logger:info_msg("[cowboy_stream_h] data(enough): StreamID=~p, IsFin=~p, DataSize=~p, BodyLen=~p~n",
-		[StreamID, IsFin, byte_size(Data), BodyLen]),
+	FullBody = <<Buffer/binary, Data/binary>>,
+	BufferFirst50 = case byte_size(Buffer) > 50 of
+		true -> binary:part(Buffer, 0, 50);
+		false -> Buffer
+	end,
+	FullBodyFirst50 = case byte_size(FullBody) > 50 of
+		true -> binary:part(FullBody, 0, 50);
+		false -> FullBody
+	end,
+	error_logger:info_msg("[cowboy_stream_h] data(enough): StreamID=~p, IsFin=~p, DataSize=~p, BodyLen=~p, FullBodySize=~p, BufferFirst50=~p, FullBodyFirst50=~p~n",
+		[StreamID, IsFin, byte_size(Data), BodyLen, byte_size(FullBody), BufferFirst50, FullBodyFirst50]),
 	ok = erlang:cancel_timer(TRef, [{async, true}, {info, false}]),
-	send_request_body(Pid, Ref, IsFin, BodyLen, <<Buffer/binary, Data/binary>>),
+	send_request_body(Pid, Ref, IsFin, BodyLen, FullBody),
 	do_data(StreamID, IsFin, Data, [], State#state{
 		expect=undefined,
 		read_body_ref=undefined,
@@ -189,8 +221,12 @@ info(StreamID, Info={read_body, Pid, Ref, auto, infinity}, State=#state{
 info(StreamID, Info={read_body, Pid, Ref, Length, _}, State=#state{
 		read_body_is_fin=IsFin, read_body_buffer=Buffer, body_length=BodyLen})
 		when IsFin =:= fin; byte_size(Buffer) >= Length ->
-	error_logger:info_msg("[cowboy_stream_h] info(read_body, enough buffered): StreamID=~p, IsFin=~p, BufferSize=~p, Length=~p~n",
-		[StreamID, IsFin, byte_size(Buffer), Length]),
+	BufferFirst50_eb = case byte_size(Buffer) > 50 of
+		true -> binary:part(Buffer, 0, 50);
+		false -> Buffer
+	end,
+	error_logger:info_msg("[cowboy_stream_h] info(read_body, enough buffered): StreamID=~p, IsFin=~p, BufferSize=~p, Length=~p, BufferFirst50=~p~n",
+		[StreamID, IsFin, byte_size(Buffer), Length, BufferFirst50_eb]),
 	send_request_body(Pid, Ref, IsFin, BodyLen, Buffer),
 	do_info(StreamID, Info, [], State#state{read_body_buffer= <<>>});
 %% Request body, not enough to send yet.
@@ -299,9 +335,13 @@ early_error(StreamID, Reason, PartialReq, Resp, Opts) ->
 	cowboy_stream:early_error(StreamID, Reason, PartialReq, Resp, Opts).
 
 send_request_body(Pid, Ref, nofin, _, Data) ->
+	error_logger:info_msg("[cowboy_stream_h] send_request_body(nofin): Pid=~p, Ref=~p, DataSize=~p~n",
+		[Pid, Ref, byte_size(Data)]),
 	Pid ! {request_body, Ref, nofin, Data},
 	ok;
 send_request_body(Pid, Ref, fin, BodyLen, Data) ->
+	error_logger:info_msg("[cowboy_stream_h] send_request_body(fin): Pid=~p, Ref=~p, BodyLen=~p, DataSize=~p~n",
+		[Pid, Ref, BodyLen, byte_size(Data)]),
 	Pid ! {request_body, Ref, fin, BodyLen, Data},
 	ok.
 
